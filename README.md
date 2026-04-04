@@ -1,4 +1,3 @@
-[![License: MIT]
 # SynthAuth
 
 **Deterministic Identity System (DIS)**
