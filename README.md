@@ -2,7 +2,7 @@
 
 **Deterministic Identity System (DIS)**
 
-SynthAuth is a passwordless, zero-knowledge-storage identity module built for [SynthDoor](https://github.com/synthdoor) — a Node.js BBS door game framework — and designed to be used anywhere.
+SynthAuth is a passwordless, zero-knowledge-storage identity module built for [SynthDoor](https://github.com/synexo/synthdoor) — a Node.js BBS door game framework — and designed to be used anywhere.
 
 There is no password database. There are no stored hashes. An identity exists only as the cryptographic collision between a username and three words from the [EFF Large Wordlist](https://www.eff.org/deeplinks/2016/07/new-wordlists-random-passphrases). If a user knows their words, they can authenticate from any machine, at any time, with no true account recovery infrastructure. If they lose their words, the identity is mathematically unreachable — by anyone.
 
