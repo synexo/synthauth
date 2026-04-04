@@ -1,0 +1,41 @@
+{
+  "name": "synth-auth",
+  "version": "1.0.0",
+  "description": "SynthAuth — Deterministic Identity System (DIS) v1.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/smoke.js && node test/integration.js",
+    "generate-secrets": "node -e \"const c=require('crypto'); console.log('PEPPER='+c.randomBytes(32).toString('hex')); console.log('SYNTH_SALT='+c.randomBytes(32).toString('hex'));\"",
+    "test:unit": "node test/smoke.js",
+    "test:integration": "node test/integration.js"
+  },
+  "keywords": [
+    "authentication",
+    "bbs",
+    "telnet",
+    "argon2",
+    "wordlist",
+    "eff",
+    "deterministic",
+    "synthdoor"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "argon2": "^0.44.0",
+    "better-sqlite3": "^12.8.0",
+    "dotenv": "^17.4.0",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "fast-levenshtein": "^3.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/synthdoor/synth-auth.git"
+  },
+  "homepage": "https://github.com/synthdoor/synth-auth#readme",
+  "bugs": {
+    "url": "https://github.com/synthdoor/synth-auth/issues"
+  }
+}
