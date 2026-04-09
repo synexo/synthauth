@@ -6,6 +6,7 @@ const express    = require('express');
 const path       = require('path');
 const crypto     = require('crypto');
 const SynthAuth  = require('./index');
+const { generateRecoveryCode } = require('./src/crypto');
 
 // ---------------------------------------------------------------------------
 // Secrets — load from .env, fall back to safe dev defaults with a warning
@@ -31,22 +32,10 @@ const auth = new SynthAuth({
 
 // ---------------------------------------------------------------------------
 // Pending dialogue sessions
-// Each web SSE connection gets a UUID. The flow communicates with the browser
-// via a simple promise/resolve queue — the server side "prompts" and waits
-// for the client to POST back an answer.
 // ---------------------------------------------------------------------------
 
 /** @type {Map<string, PendingSession>} */
 const pendingSessions = new Map();
-
-/**
- * @typedef {object} PendingSession
- * @property {string[]}    outputQueue   lines waiting to be sent to client
- * @property {Function|null} resolveNext resolve() for the current prompt
- * @property {string|null}   promptText  current prompt text
- * @property {Function}      sseWrite    write a line to SSE stream
- * @property {boolean}       done        flow has finished
- */
 
 function createDialogue(sessionId) {
   const session = {
@@ -94,7 +83,6 @@ app.use(auth.sessions.expressMiddleware());
 
 // ---------------------------------------------------------------------------
 // POST /api/start
-// Begins a new auth flow. Returns { sessionId }.
 // ---------------------------------------------------------------------------
 app.post('/api/start', (req, res) => {
   const sessionId = crypto.randomUUID();
@@ -102,7 +90,6 @@ app.post('/api/start', (req, res) => {
   const dialogue  = createDialogue(sessionId);
   const session   = pendingSessions.get(sessionId);
 
-  // Run the flow asynchronously — it will block on dialogue.prompt() calls
   auth.entryFlow(dialogue, ipAddress)
     .then(result => {
       session.result = result;
@@ -124,7 +111,6 @@ app.post('/api/start', (req, res) => {
 
 // ---------------------------------------------------------------------------
 // GET /api/stream/:sessionId  (Server-Sent Events)
-// Client connects here to receive output lines and prompt events.
 // ---------------------------------------------------------------------------
 app.get('/api/stream/:sessionId', (req, res) => {
   const { sessionId } = req.params;
@@ -134,7 +120,6 @@ app.get('/api/stream/:sessionId', (req, res) => {
     return res.status(404).json({ error: 'Session not found' });
   }
 
-  // Set up SSE
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -146,13 +131,11 @@ app.get('/api/stream/:sessionId', (req, res) => {
 
   session.sseWrite = sseWrite;
 
-  // Flush any buffered output that arrived before SSE connected
   for (const item of session.outputQueue) {
     sseWrite(item);
   }
   session.outputQueue = [];
 
-  // If flow is already done (race condition)
   if (session.done) {
     sseWrite({ type: 'done', result: session.result });
   }
@@ -164,7 +147,6 @@ app.get('/api/stream/:sessionId', (req, res) => {
 
 // ---------------------------------------------------------------------------
 // POST /api/respond/:sessionId
-// Client sends the user's typed response to the current prompt.
 // ---------------------------------------------------------------------------
 app.post('/api/respond/:sessionId', (req, res) => {
   const { sessionId } = req.params;
@@ -183,17 +165,12 @@ app.post('/api/respond/:sessionId', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/session — check current HTTP session (from token cookie/header)
+// GET /api/session
 // ---------------------------------------------------------------------------
 app.get('/api/session', (req, res) => {
   if (req.synthSession) {
-    // Destructure to pull internalId out, then use '...safe' to send the rest
     const { internalId, ...safeSession } = req.synthSession;
-    
-    return res.json({ 
-      authenticated: true, 
-      ...safeSession 
-    });
+    return res.json({ authenticated: true, ...safeSession });
   }
   res.json({ authenticated: false });
 });
@@ -206,6 +183,15 @@ app.post('/api/logout', (req, res) => {
     auth.sessions.destroy(req.synthToken);
   }
   res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/generate-bbs-code
+// Returns a freshly generated random valid BBS recovery code.
+// ---------------------------------------------------------------------------
+app.get('/api/generate-bbs-code', (req, res) => {
+  const code = generateRecoveryCode();
+  res.json({ code });
 });
 
 // ---------------------------------------------------------------------------

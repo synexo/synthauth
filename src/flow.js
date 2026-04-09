@@ -24,6 +24,7 @@ const {
   isValidUsernameInput,
   deriveIdentity,
   decodeRecoveryCode,
+  decodeRecoveryCodeToWords,
 } = require('./crypto');
 
 // ---------------------------------------------------------------------------
@@ -99,27 +100,13 @@ function looksLikeRecoveryCode(input) {
 async function tryDecodeAndVerifyRecovery(rawCode, rawUsername, config) {
   const { wordList, db } = config;
 
-  // 1. Structural format check
-  if (!looksLikeRecoveryCode(rawCode)) return null;
+  // 1. Structural format check + Crockford decode + range check
+  const decoded = decodeRecoveryCodeToWords(rawCode, wordList);
+  if (!decoded) return null;
 
-  // 2. Normalize to uppercase (accept lowercase input)
-  const normalized = normalizeRecoveryCode(rawCode);
+  const recoveredWords = decoded.words;
 
-  // 3. Crockford decode
-  let indices;
-  try {
-    indices = decodeRecoveryCode(normalized);
-  } catch (e) {
-    return null;
-  }
-
-  // 4. Range check
-  if (indices.some(i => i < 0 || i > 7775)) return null;
-
-  // 5. Map indices to words
-  const recoveredWords = indices.map(i => wordList.atIndex(i));
-
-  // 6. Derive identity
+  // 2. Derive identity
   let identity;
   try {
     identity = await deriveIdentity(
@@ -133,10 +120,47 @@ async function tryDecodeAndVerifyRecovery(rawCode, rawUsername, config) {
     return null;
   }
 
-  // 7. Registry check — must exist before we reveal anything
+  // 3. Registry check — must exist before we reveal anything
   if (!db.find(identity.internalId)) return null;
 
   return { recoveredWords, identity };
+}
+
+/**
+ * Attempt to decode a recovery code and derive the identity, WITHOUT
+ * checking the database. Used for silent BBS auto-registration: if the
+ * code is cryptographically valid but no account exists yet, we create one.
+ *
+ * Returns { words, identity } on successful decode+derive, null if the
+ * code itself is bad (bad format, out-of-range indices, Argon2 failure).
+ *
+ * @param {string} rawCode
+ * @param {string} rawUsername
+ * @param {object} config
+ * @returns {Promise<{ words: string[], identity: object }|null>}
+ */
+async function tryDecodeRecoveryNoDB(rawCode, rawUsername, config) {
+  const { wordList } = config;
+
+  // Structural + range validation (no DB)
+  const decoded = decodeRecoveryCodeToWords(rawCode, wordList);
+  if (!decoded) return null;
+
+  // Derive identity from the decoded words
+  let identity;
+  try {
+    identity = await deriveIdentity(
+      rawUsername,
+      decoded.words,
+      config.pepper,
+      config.synthSalt,
+      wordList
+    );
+  } catch (e) {
+    return null;
+  }
+
+  return { words: decoded.words, identity };
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +199,8 @@ async function entryFlow(dialogue, config) {
  * - If a clean, valid submission (correct EFF words, no duplicates) produces
  *   no InternalID match AND no PublicID collision, the user is offered the
  *   chance to register with those exact words.
+ * - If a structurally valid recovery code is entered and decodes successfully
+ *   but no account exists, the account is silently created (BBS rlogin path).
  *
  * @param {object}      dialogue
  * @param {object}      config
@@ -221,36 +247,73 @@ async function loginFlow(dialogue, config, prefilledUsername = null) {
         }
       }
 
+      // Step 1: try full verify (code valid + account exists) → normal login
       const recovered = await tryDecodeAndVerifyRecovery(trimmed, rawUsername.trim(), config);
 
-      if (!recovered) {
-        failedAttempts++;
+      if (recovered) {
+        // Account exists — log in normally
+        const token = sessions.create({
+          username:   recovered.identity.displayName,
+          publicId:   recovered.identity.publicId,
+          internalId: recovered.identity.internalId,
+        });
         dialogue.send('');
-        dialogue.send('Invalid identity. Contemplate the songs and pictures for your words and try again.');
+        dialogue.send(`Welcome back, ${recovered.identity.publicId}!`);
         dialogue.send('');
-        if (failedAttempts >= RECOVER_REMINDER_AFTER) {
-          dialogue.send('  Tip: type "recover" to use your recovery key instead.');
-          dialogue.send('');
-        }
-        continue;
+        return {
+          success:  true,
+          action:   'login',
+          username: recovered.identity.displayName,
+          publicId: recovered.identity.publicId,
+          token,
+        };
       }
 
-      // Valid recovery code — grant session
-      const token = sessions.create({
-        username:   recovered.identity.displayName,
-        publicId:   recovered.identity.publicId,
-        internalId: recovered.identity.internalId,
-      });
+      // Step 2: code is structurally/cryptographically valid but no account —
+      // attempt silent BBS auto-registration (no words/key shown, no prompts)
+      const decoded = await tryDecodeRecoveryNoDB(trimmed, rawUsername.trim(), config);
+
+      if (decoded) {
+        // Valid code, no account yet — silently register
+        const rl = ipAddress
+          ? db.rateLimit(`register:${ipAddress}`, 1, 60)
+          : { allowed: true };
+
+        if (!rl.allowed) {
+          dialogue.send('Too many registration attempts. Please try again in a minute.');
+          return { success: false, reason: 'rate_limited' };
+        }
+
+        // TOCTOU guard: check one more time right before write
+        if (!db.publicIdExists(decoded.identity.internalId)) {
+          db.register(decoded.identity.internalId, ipAddress || null);
+        }
+        // Whether we just registered or another concurrent request beat us,
+        // the account now exists — issue a session
+        const token = sessions.create({
+          username:   decoded.identity.displayName,
+          publicId:   decoded.identity.publicId,
+          internalId: decoded.identity.internalId,
+        });
+        return {
+          success:  true,
+          action:   'register',
+          username: decoded.identity.displayName,
+          publicId: decoded.identity.publicId,
+          token,
+        };
+      }
+
+      // Code was bad format/range — treat as a failed attempt
+      failedAttempts++;
       dialogue.send('');
-      dialogue.send(`Welcome back, ${recovered.identity.publicId}!`);
+      dialogue.send('Invalid identity. Contemplate the songs and pictures for your words and try again.');
       dialogue.send('');
-      return {
-        success:  true,
-        action:   'login',
-        username: recovered.identity.displayName,
-        publicId: recovered.identity.publicId,
-        token,
-      };
+      if (failedAttempts >= RECOVER_REMINDER_AFTER) {
+        dialogue.send('  Tip: type "recover" to use your recovery key instead.');
+        dialogue.send('');
+      }
+      continue;
     }
 
     // ── Three-word entry ───────────────────────────────────────────────────
@@ -406,11 +469,6 @@ async function registrationFlow(dialogue, config, prefilled = null) {
         config.synthSalt,
         wordList
       );
-      // Guard against PublicID collisions, not just exact InternalID collisions.
-      // Two distinct word sets can produce InternalIDs whose first 6 suffix chars
-      // are identical, which would map to the same PublicID. publicIdExists()
-      // checks the 20-char prefix (13 username + "-" + 6 suffix chars) and
-      // catches both cases: exact InternalID match and partial-suffix collision.
       if (!db.publicIdExists(candidate.internalId)) { identity = candidate; break; }
     }
 
@@ -441,8 +499,6 @@ async function registrationFlow(dialogue, config, prefilled = null) {
   dialogue.send('');
 
   // Muscle-memory confirmation.
-  // We know the exact correct words here. No Levenshtein — just a plain
-  // case-insensitive, order-independent comparison.
   let confirmed    = false;
   let confirmAttempts = 0;
 
@@ -475,10 +531,7 @@ async function registrationFlow(dialogue, config, prefilled = null) {
     return { success: false, reason: 'confirmation_failed' };
   }
 
-  // --- TOCTOU FIX START ---
-  // Re-verify uniqueness one last time right before the 'Use' (the write).
-  // This handles the gap where another user might have registered 
-  // the same PublicID while this user was busy typing their confirmation.
+  // TOCTOU guard
   if (db.publicIdExists(identity.internalId)) {
     dialogue.send('');
     dialogue.send('Error: This identity was claimed by another session while you were confirming.');
@@ -486,7 +539,6 @@ async function registrationFlow(dialogue, config, prefilled = null) {
     dialogue.send('');
     return { success: false, reason: 'username_unavailable' };
   }
-  // --- TOCTOU FIX END ---
 
   db.register(identity.internalId, ipAddress || null);
 
@@ -544,7 +596,6 @@ async function recoveryFlow(dialogue, config, rawUsername) {
     const codeInput = await dialogue.prompt('Enter your recovery key (XXXX-XXXX): ');
 
     // Validate format + existence before revealing anything.
-    // Lowercase input is normalised to uppercase inside tryDecodeAndVerifyRecovery.
     const recovered = await tryDecodeAndVerifyRecovery(
       codeInput.trim(),
       rawUsername,
@@ -577,7 +628,6 @@ async function recoveryFlow(dialogue, config, rawUsername) {
     dialogue.send('');
 
     // ── Muscle-memory re-entry ─────────────────────────────────────────────
-    // No Levenshtein — we know exactly what words are expected.
     let confirmed    = false;
     let reAttempts   = 0;
 
@@ -629,7 +679,6 @@ async function recoveryFlow(dialogue, config, rawUsername) {
     };
   }
 
-  // Should not reach here (loop exits via return or rate-limit), but be safe
   return { success: false, reason: 'max_attempts' };
 }
 

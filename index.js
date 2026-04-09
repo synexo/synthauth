@@ -24,6 +24,9 @@
  *     connection.username = result.username;
  *     connection.token    = result.token;
  *   }
+ *
+ *   // Generate a BBS system code (for rlogin auto-registration):
+ *   const bbsCode = auth.generateBBSCode();
  */
 
 const path         = require('path');
@@ -95,6 +98,12 @@ class SynthAuth {
   /**
    * Login flow only (useful when username is already known, e.g. from DORINFO1).
    *
+   * For rlogin BBS integration: pass the BBS username as prefilledUsername and
+   * have the transport layer supply the BBS system code at the code words prompt.
+   * If the system code decodes to a valid word triple but no account exists yet,
+   * the account is silently created and a session token returned — no prompts
+   * or word disclosure.
+   *
    * @param {object}      dialogue
    * @param {string|null} ipAddress
    * @param {string}      [prefilledUsername]
@@ -141,6 +150,28 @@ class SynthAuth {
    */
   async deriveIdentity(rawUsername, rawWords) {
     return crypto.deriveIdentity(rawUsername, rawWords, this._pepper, this._synthSalt, this.wordList);
+  }
+
+  // ---------------------------------------------------------------------------
+  // BBS integration helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Generate a cryptographically random valid BBS system code.
+   *
+   * The returned code is a standard Crockford Base32 recovery code (XXXX-XXXX)
+   * that maps to a unique word triple. Use it as the static system-id value
+   * sent via rlogin. All users connecting from that BBS will share this code;
+   * combined with their username it deterministically creates (or looks up)
+   * their per-user identity.
+   *
+   * Generate once per BBS system and store it securely — treat it like a
+   * password. A different code produces a completely separate identity space.
+   *
+   * @returns {string}  e.g. "H8F3-9A2X"
+   */
+  generateBBSCode() {
+    return crypto.generateRecoveryCode();
   }
 }
 

@@ -2,7 +2,7 @@
 
 **Deterministic Identity System (DIS)**
 
-SynthAuth is a passwordless, zero-knowledge-storage identity module built for [SynthDoor](https://github.com/synthdoor) — a Node.js BBS door game framework — and designed to be used anywhere.
+SynthAuth is a passwordless, zero-knowledge-storage identity module built for [SynthDoor](https://github.com/synexo/synthdoor) — a Node.js BBS door game framework — and designed to be used anywhere.
 
 There is no password database. There are no stored hashes. An identity exists only as the cryptographic collision between a username and three words from the [EFF Large Wordlist](https://www.eff.org/deeplinks/2016/07/new-wordlists-random-passphrases). If a user knows their words, they can authenticate from any machine, at any time, with no true account recovery infrastructure. If they lose their words, the identity is mathematically unreachable — by anyone.
 
@@ -17,6 +17,9 @@ Example account:
 
 ✅ **BBS door games, MUDs, ephemeral game sessions**  
 Single-session accounts; account loss = reset character. No persistent user database needed. Online rate limiting prevents casual brute-force.
+
+✅ **BBS rlogin integration**  
+A BBS sends a static system code as the rlogin system-id and the player's username as the user-id. Users are silently auto-registered on first connection and recognized on every subsequent one — no prompts, no word disclosure. See [BBS rlogin Integration](#bbs-rlogin-integration).
 
 ✅ **Video game save codes**  
 "Glacier Banana Whiskey" instead of "A5FX9KL2Z". Deterministic, memorable, offline-verifiable. Modern alternative to classic game codes.
@@ -43,6 +46,7 @@ Throwaway accounts with no email/password reset infrastructure. Account expires 
 - [Architecture](#architecture)
 - [API Reference](#api-reference)
 - [Auth Flows](#auth-flows)
+- [BBS rlogin Integration](#bbs-rlogin-integration)
 - [UX Design](#ux-design)
 - [SynthDoor Integration](#synthdoor-integration)
 - [Security Reference](#security-reference)
@@ -109,6 +113,8 @@ code  = CrockfordBase32(value, padded to 8 chars)
 
 The recovery code is a **lossless, deterministic representation** of the three words. It decodes back to the exact triple. It is displayed once at registration and never stored.
 
+An 8-character Crockford string holds 40 bits (32⁸ = 1,099,511,627,776 values). The maximum valid word-triple encodes to 470,184,984,575 — so approximately 42.8% of all syntactically valid 8-character Crockford strings map to a valid word triple. The remaining 57.2% are out-of-range and rejected during decode. This is relevant to the BBS rlogin integration: `generateBBSCode()` always produces a code in the valid 42.8% range.
+
 ---
 
 ## Quick Start
@@ -148,7 +154,7 @@ npm start
 # → http://localhost:3000
 ```
 
-The web interface provides a retro BBS terminal UI for testing all auth flows — registration, login, and recovery — in a browser.
+The web interface provides a retro BBS terminal UI for testing all auth flows — registration, login, recovery, and BBS code generation — in a browser.
 
 ### Run the test suite
 
@@ -168,7 +174,8 @@ synth-auth/
 ├── server.js                 ← Express server + SSE dialogue bridge (test/web use)
 ├── src/
 │   ├── crypto.js             ← All deterministic identity math
-│   │                           (normalization, HMAC, Argon2id, Base62, Crockford B32)
+│   │                           (normalization, HMAC, Argon2id, Base62, Crockford B32,
+│   │                            recovery code generation)
 │   ├── wordlist.js           ← EFF wordlist loader, validator, Levenshtein hints
 │   ├── db.js                 ← SQLite identity registry + rate limiting
 │   ├── session.js            ← In-memory session store (HTTP tokens + TCP handles)
@@ -187,7 +194,7 @@ synth-auth/
 
 ### Module responsibilities
 
-**`crypto.js`** — Pure functions with no side effects. Username normalization, HMAC-derived user salts, Argon2id key derivation, Base62 encoding, Crockford Base32 encode/decode, recovery code packing and unpacking. All deterministic; nothing is stored.
+**`crypto.js`** — Pure functions with no side effects. Username normalization, HMAC-derived user salts, Argon2id key derivation, Base62 encoding, Crockford Base32 encode/decode, recovery code packing and unpacking, random BBS code generation, and a pre-DB decode helper (`decodeRecoveryCodeToWords`) used by the silent registration path. All deterministic; nothing is stored.
 
 **`wordlist.js`** — Loads and indexes the EFF Large Wordlist (7,776 entries). O(1) validation via `Set`, sequential index lookup, `pickUnique` for random selection, and Levenshtein-based `closestMatch` for the "did you mean?" hint system.
 
@@ -195,7 +202,7 @@ synth-auth/
 
 **`session.js`** — In-memory session store. Issues opaque 32-byte random tokens for HTTP use; provides Express middleware. Also supports connection-keyed sessions for TCP/telnet transports where a socket handle is the natural session key. Prunes expired sessions automatically.
 
-**`flow.js`** — The three auth flows: `entryFlow`, `loginFlow`, `registrationFlow`, `recoveryFlow`. All I/O is abstracted through a **dialogue adapter** (`send` / `prompt`), making every flow transport-agnostic. The same code runs over telnet, SSE, WebSocket, or a test harness without modification.
+**`flow.js`** — The three auth flows: `entryFlow`, `loginFlow`, `registrationFlow`, `recoveryFlow`. All I/O is abstracted through a **dialogue adapter** (`send` / `prompt`), making every flow transport-agnostic. The same code runs over telnet, SSE, WebSocket, or a test harness without modification. The login flow contains the silent BBS auto-registration path — see [BBS rlogin Integration](#bbs-rlogin-integration).
 
 **`index.js`** — The `SynthAuth` class. Wires all modules together, exposes the public API, and builds the config object passed to flow functions.
 
@@ -231,7 +238,7 @@ const result = await auth.entryFlow(dialogue, socket.remoteAddress);
 
 #### `auth.loginFlow(dialogue, ipAddress?, prefilledUsername?)`
 
-Login only. Accepts a pre-known username (e.g. from a DORINFO1 file) to skip the username prompt.
+Login only. Accepts a pre-known username (e.g. from a DORINFO1 file) to skip the username prompt. Also handles silent BBS auto-registration — see [BBS rlogin Integration](#bbs-rlogin-integration).
 
 ```js
 const result = await auth.loginFlow(dialogue, ip, 'KnownUser');
@@ -285,6 +292,15 @@ const identity = await auth.deriveIdentity('Bob', ['flood', 'robot', 'change']);
 //   publicId:           'Bob-<6chars>',
 //   recoveryCode:       'XXXX-XXXX',
 // }
+```
+
+### `auth.generateBBSCode()`
+
+Generate a cryptographically random valid BBS system code. Every code produced maps to a valid word triple. See [BBS rlogin Integration](#bbs-rlogin-integration) for usage.
+
+```js
+const systemCode = auth.generateBBSCode();
+// → e.g. "H8F3-9A2X"
 ```
 
 ### `auth.sessions` — SessionStore
@@ -420,6 +436,118 @@ The recovery code is decoded to the three words, which are displayed with the Ma
 
 ---
 
+## BBS rlogin Integration
+
+### Overview
+
+Traditional BBS software supports rlogin connections from external systems. The rlogin protocol sends two values: a **user-id** (the player's username on the originating BBS) and a **system-id** (an identifier for the originating BBS itself).
+
+SynthAuth uses these two values together to silently create and recognize player identities with zero interaction. The player connects, plays, and disconnects without ever seeing an authentication prompt.
+
+```
+BBS user-id   →  username field  (e.g. "Bob")
+BBS system-id →  code words prompt  (the static BBS recovery code, e.g. "H8F3-9A2X")
+```
+
+The BBS system code is a standard SynthAuth recovery code. Combined with the username, it deterministically derives a unique identity for that player on that BBS. The same code always produces the same identity for the same username — so Bob on BBS-A and Bob on BBS-B are different identities, and Bob on BBS-A always maps to the same identity across reconnections.
+
+### How It Works
+
+When a structurally valid recovery code is entered at the code words prompt:
+
+1. **Account exists** → normal login, session issued, `Welcome back` shown
+2. **Account does not exist** → account silently created, session issued, no output to the user
+3. **Code is invalid** (bad format or out-of-range) → treated as a failed attempt
+
+Condition 2 is the auto-registration path. The words the code encodes are derived and used to register the identity, but they are **never shown to the user or written to any log**. The user has no knowledge of their words. This is intentional: if they knew their words, they could use them to authenticate directly, bypassing the BBS entirely and potentially impersonating other users of the same BBS.
+
+### Setting Up
+
+**Step 1: Generate a system code for your BBS**
+
+In the web UI, click **REQUEST NEW BBS CODE** in the BBS Integration panel at the bottom of the screen. Copy the generated code and store it securely — treat it like a password.
+
+Via the API:
+
+```js
+const auth = new SynthAuth({ pepper, synthSalt });
+const systemCode = auth.generateBBSCode();
+// → e.g. "H8F3-9A2X"
+```
+
+Via the HTTP endpoint (test server only):
+
+```
+GET /api/generate-bbs-code
+→ { "code": "H8F3-9A2X" }
+```
+
+**Step 2: Configure your BBS**
+
+Set the system code as the static system-id value sent with every rlogin connection to your SynthDoor instance. The exact mechanism depends on your BBS software — it is typically a per-door or per-node configuration field labeled something like "system name", "host name", or "rlogin system id."
+
+**Step 3: Wire the rlogin transport**
+
+In your SynthDoor transport handler, skip `entryFlow` entirely and call `loginFlow` with both values pre-supplied:
+
+```js
+async function handleRloginConnection(connection) {
+  const username   = connection.rlogin.userId;    // "Bob"
+  const systemCode = connection.rlogin.systemId;  // "H8F3-9A2X"
+
+  // Build a minimal dialogue adapter — for silent auto-registration
+  // the prompt() method will only be called once (for the code words),
+  // after which the flow completes with no further I/O.
+  const dialogue = {
+    send:   (text) => connection.terminal.println(text),
+    prompt: (text) => Promise.resolve(systemCode),
+  };
+
+  const result = await auth.loginFlow(dialogue, connection.remoteAddress, username);
+
+  if (!result.success) {
+    connection.terminal.println('Authentication failed. Goodbye.');
+    return connection.close();
+  }
+
+  // result.action will be 'login' (returning player) or 'register' (first visit)
+  connection.username = result.username;
+  connection.publicId = result.publicId;
+  auth.sessions.attachToConnection(connection.id, {
+    username:   result.username,
+    publicId:   result.publicId,
+    internalId: result.internalId,
+  });
+
+  routeToGame(connection);
+}
+```
+
+The dialogue adapter above always returns the system code when prompted. On first connection, `loginFlow` silently registers the account and returns `action: 'register'`. On all subsequent connections it returns `action: 'login'`. The flow produces no visible output in either case.
+
+### Security Properties of the BBS Path
+
+| Property | Detail |
+|---|---|
+| **Per-BBS isolation** | Each BBS has a unique system code. Bob on BBS-A and Bob on BBS-B derive different identities. A player cannot carry their BBS-A identity to BBS-B. |
+| **Username collision safety** | Two players with the same username on different BBSs produce different identities because the system code differs. |
+| **No word disclosure** | The words encoded in the system code are never shown to players. They cannot authenticate directly with those words without also knowing the system code. |
+| **System code compromise** | If the system code leaks, an attacker who knows the system code and a player's username can impersonate that player. Treat the system code like a password: store it in a secrets manager, rotate it by generating a new code (all players will re-register as new accounts on next connection). |
+| **PEPPER/SYNTH_SALT compromise** | As with all SynthAuth identities, compromise of the server secrets allows full impersonation of any account. The BBS path does not change this threat model. |
+| **Rate limiting** | Silent registrations consume the `register:IP` rate limit slot (1 per minute per IP). Login attempts (returning players) consume the `login:IP` slot (5 per minute per IP). On a high-traffic BBS, the BBS server's IP will appear as the client IP — this is expected and the limits are appropriate for normal BBS traffic volumes. |
+
+### Generating Multiple Codes
+
+A single SynthDoor instance can serve multiple BBSs simultaneously, each with its own system code. Each code creates an independent identity namespace — players from different BBSs never collide, even if they share usernames.
+
+```js
+// BBS-A system code: "H8F3-9A2X"  → Bob on BBS-A → Bob-r7Kx2M
+// BBS-B system code: "3906-VB9Y"  → Bob on BBS-B → Bob-4pQn8T
+// Same username, different codes, completely separate identities.
+```
+
+---
+
 ## UX Design
 
 SynthAuth's UX is designed around the insight that the costliest moment in a wordlist-based auth system is **the moment the user forgets their words** — not the moment an attacker tries to break in. The cryptography handles the latter. The UX handles the former.
@@ -480,7 +608,24 @@ async function handleNewConnection(connection) {
     return routeToGame(connection);
   }
 
-  // No DORINFO1 — authenticate with SynthAuth.
+  // rlogin with system-id — use the silent BBS auto-registration path.
+  if (connection.rlogin && connection.rlogin.systemId) {
+    const systemCode = connection.rlogin.systemId;
+    const dialogue = {
+      send:   (text) => connection.terminal.println(text),
+      prompt: ()     => Promise.resolve(systemCode),
+    };
+    const result = await auth.loginFlow(dialogue, connection.remoteAddress, connection.rlogin.userId);
+    if (!result.success) return connection.close();
+    connection.username = result.username;
+    connection.publicId = result.publicId;
+    auth.sessions.attachToConnection(connection.id, {
+      username: result.username, publicId: result.publicId, internalId: result.internalId,
+    });
+    return routeToGame(connection);
+  }
+
+  // No DORINFO1, no rlogin — authenticate interactively with SynthAuth.
   const dialogue = {
     send:   (text) => connection.terminal.println(text),
     prompt: (text) => connection.terminal.readLine({ prompt: text }),
@@ -532,6 +677,7 @@ The dialogue adapter and session store design anticipates a full BBS shell where
 - Session-based accounts (BBS games, ephemeral chat, throwaway forums)
 - Single-use or short-lived identities (game save codes, license keys)
 - Peer-to-peer verification where secrets are never stored server-side
+- BBS rlogin auto-registration (see above)
 
 **This is not acceptable for**:
 - Banking, medical, government, or any regulated sector
@@ -549,6 +695,7 @@ The dialogue adapter and session store design anticipates a full BBS shell where
 | Online brute-force / stuffing | 5 failed login attempts per IP per minute. 1 registration per IP per minute. |
 | Levenshtein hint leaking state | The hint fires only on *dictionary validation*, before any cryptographic operation. It confirms only that an input word was absent from the EFF list — not that any other word was correct. |
 | Recovery code interception | A recovery code encodes the three words. It carries the same sensitivity. Display it once; never store it. |
+| BBS system code interception | A BBS system code is a recovery code. If intercepted, an attacker who also knows a player's username can impersonate that player. Transmit only over encrypted transports; store in a secrets manager. |
 | Error message oracle | All failed auth attempts return the same message regardless of how many words were correct. |
 
 ### Cryptographic parameters
@@ -562,6 +709,7 @@ The dialogue adapter and session store design anticipates a full BBS shell where
 | Salt derivation | HMAC-SHA256(SYNTH_SALT, username) | Unique per user without storage. Cannot be precomputed without SYNTH_SALT. |
 | Suffix encoding | Base62 (0–9, A–Z, a–z) | Dense, unambiguous printable encoding of the 32-byte master key. |
 | Recovery encoding | Crockford Base32 | Human-transcription-safe. Excludes I, L, O, U. Dash-formatted for readability. |
+| BBS code generation | `crypto.randomInt(0, 7776)` × 3 unique | Uniform distribution over valid word indices. Output is always a valid recovery code. |
 
 ### Core Limitations
 
@@ -571,6 +719,7 @@ The dialogue adapter and session store design anticipates a full BBS shell where
 | **No password changes** | Codewords cannot be changed once issued. A compromised account has no recovery path except deletion. |
 | **PEPPER loss = total loss** | If the PEPPER secret is lost or corrupted, every account becomes permanently inaccessible. There is no recovery and no rotation path. |
 | **PEPPER compromise = total compromise** | If PEPPER is leaked, all accounts are instantly compromisable. Attacker can impersonate any user without brute-force. There is no safe rotation. |
+| **BBS system code compromise** | If a BBS system code leaks, every player on that BBS is impersonatable by anyone who also has their username. Rotate by generating a new code — all players re-register as new accounts on first reconnection. |
 
 ### Fail States
 
@@ -582,6 +731,9 @@ The dialogue adapter and session store design anticipates a full BBS shell where
 
 **PEPPER or SYNTH_SALT is compromised**  
 🔴 **Total compromise.** Attacker can instantly derive and impersonate any account. No rotation is safe without invalidating all accounts. Assume all users compromised.
+
+**BBS system code is leaked**  
+🟡 **Medium risk.** Attacker can impersonate any player of that BBS whose username they know. Generate a new system code and reconfigure the BBS. All players will re-register as new accounts on next connection (their game state tied to the old identity is lost unless migrated separately).
 
 **User's recovery code is leaked**  
 🟡 **Medium risk.** Recovery code is password-equivalent (losslessly reversible to codewords). Leaked RC = attacker can impersonate for duration of session. For ephemeral games, acceptable. For persistent accounts, treat as compromise.
@@ -597,6 +749,7 @@ The dialogue adapter and session store design anticipates a full BBS shell where
 | Brute-force across many accounts | Low ✅ — Same per-IP rate limiting applies. Distributed attacks still face Argon2 latency. |
 | Database leak | Safe ✅ — Hashes without PEPPER are useless. Usernames/dates only. |
 | Intercept codewords on plaintext telnet | Exposed ❌ — Use TLS/SSH, not plaintext telnet. Transport problem, not DIS problem. |
+| Intercept BBS system code on plaintext rlogin | Exposed ❌ — Use an encrypted transport for rlogin connections carrying system codes. Same class of problem as plaintext codeword interception. |
 
 
 ## Reporting a Vulnerability
@@ -616,11 +769,14 @@ Reviewers should be aware of the following intentional design decisions:
 - **No secrets are stored.** The identity registry contains only `InternalID` values (Argon2id outputs). The three code words and the PEPPER/SYNTH_SALT secrets are never written to disk by this module.
 - **PEPPER and SYNTH_SALT are deployment secrets.** Their loss is catastrophic and irreversible by design — this is the trade-off for zero stored secrets.
 - **The Levenshtein hint is pre-derivation.** It fires on dictionary validation only, before any cryptographic operation, and cannot be used to probe the identity state.
+- **BBS auto-registration is deliberately silent.** The words encoded in a BBS system code are never disclosed to the connecting user. If they were, a user could bypass the BBS entirely by entering the system code's words directly, allowing cross-user impersonation on any BBS sharing that code.
+- **42.8% of the Crockford space is valid.** An 8-character Crockford string holds 40 bits. The maximum encodable word triple occupies ~38.8 bits. `generateBBSCode()` produces only codes in the valid range by construction (indices are drawn from `[0, 7776)` directly). The 57.2% out-of-range codes are rejected at the range-check stage in `decodeRecoveryCodeToWords` before any cryptographic work is done.
 
 
 ### Operational notes
 
 - **PEPPER and SYNTH_SALT must never be co-located with the database.** Use a secrets manager or separate infrastructure.
+- **BBS system codes must be stored with the same care as PEPPER and SYNTH_SALT.** They are effectively sub-keys that grant identity derivation power for all players of a given BBS.
 - **Argon2id derivation must stay asynchronous.** Each call blocks the thread for 200–400 ms. In SynthDoor's multi-player telnet environment, synchronous derivation would stall all active connections during auth. All flow functions are `async` for this reason.
 - **Sessions are in-memory.** A process restart clears all active sessions. For high-availability deployments, back the session store with Redis or a database.
 - **Rate limit counters are per-process.** The SQLite rate limiter is correct for single-process deployments. Clustered deployments should use a shared store.
@@ -647,6 +803,8 @@ CREATE TABLE rate_limits (
 ```
 
 PublicID is **never stored**. It is derived on demand from InternalID by trimming trailing underscores from the username portion and taking the first 6 characters of the Base62 suffix.
+
+Identities created via BBS auto-registration are indistinguishable in the database from identities created through interactive registration. The `ip_address` field records the connecting IP at registration time — for rlogin connections this will be the BBS server's IP.
 
 ---
 

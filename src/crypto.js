@@ -215,6 +215,55 @@ function decodeRecoveryCode(code) {
   return [i0, i1, i2];
 }
 
+/**
+ * Generate a cryptographically random valid recovery code.
+ * Picks 3 unique random word indices (0–7775), packs them, and encodes
+ * as Crockford Base32. Every code produced is guaranteed to decode back
+ * to a valid word triple.
+ *
+ * @returns {string}  e.g. "H8F3-9A2X"
+ */
+function generateRecoveryCode() {
+  const indices = [];
+  while (indices.length < 3) {
+    const idx = crypto.randomInt(0, 7776);
+    if (!indices.includes(idx)) indices.push(idx);
+  }
+  return encodeRecoveryCode(indices);
+}
+
+/**
+ * Attempt to decode a recovery code string to word indices + words, without
+ * any database interaction. Returns null if the code is structurally invalid,
+ * fails Crockford decode, or produces out-of-range indices.
+ *
+ * This is the pre-DB step used to distinguish "bad format/range" from
+ * "valid code but no account" — the latter is used for silent BBS
+ * auto-registration.
+ *
+ * @param {string}   rawCode
+ * @param {WordList} wordList
+ * @returns {{ indices: number[], words: string[] } | null}
+ */
+function decodeRecoveryCodeToWords(rawCode, wordList) {
+  const RECOVERY_CODE_RE = /^[0-9A-Za-z]{4}-?[0-9A-Za-z]{4}$/;
+  if (!RECOVERY_CODE_RE.test(rawCode.trim())) return null;
+
+  const normalized = rawCode.trim().replace(/-/g, '').toUpperCase();
+
+  let indices;
+  try {
+    indices = decodeRecoveryCode(normalized);
+  } catch (e) {
+    return null;
+  }
+
+  if (indices.some(i => i < 0 || i > 7775)) return null;
+
+  const words = indices.map(i => wordList.atIndex(i));
+  return { indices, words };
+}
+
 // ---------------------------------------------------------------------------
 // High-level identity creation helper (called by flow.js)
 // ---------------------------------------------------------------------------
@@ -263,5 +312,7 @@ module.exports = {
   crockfordDecode,
   encodeRecoveryCode,
   decodeRecoveryCode,
+  decodeRecoveryCodeToWords,
+  generateRecoveryCode,
   deriveIdentity,
 };

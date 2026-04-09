@@ -355,6 +355,99 @@
     box-shadow: var(--glow);
   }
 
+  /* ── BBS Code Generator panel ── */
+  #bbs-panel {
+    width: 100%;
+    max-width: 800px;
+    border: 1px solid var(--border);
+    border-top: none;
+    background: var(--bg2);
+    flex-shrink: 0;
+    padding: 8px 16px 10px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  #bbs-panel .bbs-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    white-space: nowrap;
+  }
+
+  #bbs-generate-btn {
+    background: transparent;
+    border: 1px solid var(--amber-dim);
+    color: var(--amber-dim);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 3px 10px;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: all 0.15s;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  #bbs-generate-btn:hover {
+    background: rgba(255,184,0,0.08);
+    color: var(--amber);
+    border-color: var(--amber);
+    box-shadow: 0 0 8px rgba(255,184,0,0.3);
+  }
+
+  #bbs-code-display {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  #bbs-code-display.visible { display: flex; }
+
+  #bbs-code-value {
+    font-family: var(--font-bbs);
+    font-size: 20px;
+    color: var(--amber);
+    text-shadow: 0 0 8px rgba(255,184,0,0.5);
+    letter-spacing: 3px;
+    white-space: nowrap;
+  }
+
+  #bbs-copy-btn {
+    background: transparent;
+    border: 1px solid var(--amber-dim);
+    color: var(--amber-dim);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 2px 8px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  #bbs-copy-btn:hover {
+    color: var(--amber);
+    border-color: var(--amber);
+  }
+
+  #bbs-copy-btn.copied {
+    color: var(--green);
+    border-color: var(--green);
+  }
+
+  #bbs-code-note {
+    font-size: 10px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   /* ── Boot animation ── */
   @keyframes boot-flash {
     0%   { opacity: 0; }
@@ -433,6 +526,17 @@
 
   </div>
 
+  <!-- BBS Code Generator panel -->
+  <div id="bbs-panel">
+    <span class="bbs-label">BBS INTEGRATION:</span>
+    <button id="bbs-generate-btn">REQUEST NEW BBS CODE</button>
+    <div id="bbs-code-display">
+      <span id="bbs-code-value"></span>
+      <button id="bbs-copy-btn">COPY</button>
+      <span id="bbs-code-note">send as system-id via rlogin · users auto-register on first connection</span>
+    </div>
+  </div>
+
   <!-- Bottom bar -->
   <div id="bottombar">
     <span class="hint">ENTER to send &nbsp;·&nbsp; "new" to register &nbsp;·&nbsp; "recover" or enter XXXX-XXXX to restore</span>
@@ -458,14 +562,18 @@ const logoutBtn   = document.getElementById('logout-btn');
 const nodeId      = document.getElementById('node-id');
 const clock       = document.getElementById('clock');
 
+// BBS panel elements
+const bbsGenerateBtn  = document.getElementById('bbs-generate-btn');
+const bbsCodeDisplay  = document.getElementById('bbs-code-display');
+const bbsCodeValue    = document.getElementById('bbs-code-value');
+const bbsCopyBtn      = document.getElementById('bbs-copy-btn');
+
 let sessionId   = null;
 let eventSource = null;
 let flowDone    = false;
 
-// Assign a pseudo-node ID for the display
 nodeId.textContent = Math.random().toString(36).slice(2,6).toUpperCase();
 
-// Clock
 function updateClock() {
   clock.textContent = new Date().toLocaleTimeString('en-GB');
 }
@@ -488,8 +596,6 @@ function classifyLine(text) {
   return 'line';
 }
 
-// Scroll to the bottom after the browser has finished laying out new content.
-// Using rAF + a second rAF ensures we scroll after paint, not before.
 function scrollToBottom() {
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
@@ -551,7 +657,6 @@ function disableInput() {
 // ---------------------------------------------------------------------------
 
 async function startFlow() {
-  // Reset UI
   output.innerHTML = '';
   restartBtn.classList.remove('visible');
   flowDone = false;
@@ -561,10 +666,8 @@ async function startFlow() {
   connState.textContent = 'CONNECTING';
   connState.className   = 'conn-state';
 
-  // Close previous SSE if any
   if (eventSource) { eventSource.close(); eventSource = null; }
 
-  // Request a new session
   let data;
   try {
     const resp = await fetch('/api/start', { method: 'POST' });
@@ -578,7 +681,6 @@ async function startFlow() {
 
   sessionId = data.sessionId;
 
-  // Open SSE stream
   eventSource = new EventSource(`/api/stream/${sessionId}`);
   connState.textContent = 'CONNECTED';
 
@@ -602,7 +704,6 @@ async function startFlow() {
       restartBtn.classList.add('visible');
       eventSource.close();
 
-      // If success, save token as cookie + update session badge
       const result = msg.result;
       if (result && result.success && result.token) {
         document.cookie = `synthauth_token=${result.token}; path=/; SameSite=Strict`;
@@ -639,7 +740,6 @@ async function sendInput() {
   if (!sessionId || flowDone) return;
   const val = userInput.value;
 
-  // Echo input to terminal (show what user typed)
   appendLine('▶  ' + val, 'line bright');
 
   disableInput();
@@ -681,6 +781,52 @@ function getCookie(name) {
 }
 
 // ---------------------------------------------------------------------------
+// BBS Code Generator
+// ---------------------------------------------------------------------------
+
+bbsGenerateBtn.addEventListener('click', async () => {
+  bbsGenerateBtn.textContent = 'GENERATING...';
+  bbsGenerateBtn.disabled = true;
+
+  try {
+    const resp = await fetch('/api/generate-bbs-code');
+    const data = await resp.json();
+    bbsCodeValue.textContent = data.code;
+    bbsCodeDisplay.classList.add('visible');
+    bbsCopyBtn.textContent = 'COPY';
+    bbsCopyBtn.classList.remove('copied');
+  } catch (e) {
+    bbsCodeValue.textContent = 'ERROR';
+    bbsCodeDisplay.classList.add('visible');
+  } finally {
+    bbsGenerateBtn.textContent = 'REQUEST NEW BBS CODE';
+    bbsGenerateBtn.disabled = false;
+  }
+});
+
+bbsCopyBtn.addEventListener('click', async () => {
+  const code = bbsCodeValue.textContent;
+  if (!code || code === 'ERROR') return;
+
+  try {
+    await navigator.clipboard.writeText(code);
+    bbsCopyBtn.textContent = 'COPIED';
+    bbsCopyBtn.classList.add('copied');
+    setTimeout(() => {
+      bbsCopyBtn.textContent = 'COPY';
+      bbsCopyBtn.classList.remove('copied');
+    }, 2000);
+  } catch (e) {
+    // Fallback for browsers without clipboard API
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(bbsCodeValue);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Event listeners
 // ---------------------------------------------------------------------------
 
@@ -696,10 +842,8 @@ logoutBtn.addEventListener('click', logout);
 // ---------------------------------------------------------------------------
 
 async function boot() {
-  // Wait for boot animation
   await new Promise(r => setTimeout(r, 1200));
 
-  // Check for an existing session
   const token = getCookie('synthauth_token');
   if (token) {
     const resp = await fetch('/api/session', {
