@@ -488,42 +488,43 @@ Set the system code as the static system-id value sent with every rlogin connect
 
 **Step 3: Wire the rlogin transport**
 
-In your SynthDoor transport handler, skip `entryFlow` entirely and call `loginFlow` with both values pre-supplied:
-
-```js
-async function handleRloginConnection(connection) {
-  const username   = connection.rlogin.userId;    // "Bob"
-  const systemCode = connection.rlogin.systemId;  // "H8F3-9A2X"
-
-  // Build a minimal dialogue adapter — for silent auto-registration
-  // the prompt() method will only be called once (for the code words),
-  // after which the flow completes with no further I/O.
-  const dialogue = {
-    send:   (text) => connection.terminal.println(text),
-    prompt: (text) => Promise.resolve(systemCode),
-  };
-
-  const result = await auth.loginFlow(dialogue, connection.remoteAddress, username);
-
-  if (!result.success) {
-    connection.terminal.println('Authentication failed. Goodbye.');
-    return connection.close();
-  }
-
-  // result.action will be 'login' (returning player) or 'register' (first visit)
-  connection.username = result.username;
-  connection.publicId = result.publicId;
-  auth.sessions.attachToConnection(connection.id, {
-    username:   result.username,
-    publicId:   result.publicId,
-    internalId: result.internalId,
-  });
-
-  routeToGame(connection);
-}
+From Synthdoor's rlogin.js:
 ```
-
-The dialogue adapter above always returns the system code when prompted. On first connection, `loginFlow` silently registers the account and returns `action: 'register'`. On all subsequent connections it returns `action: 'login'`. The flow produces no visible output in either case.
+/**
+ * transports/rlogin.js
+ * rlogin transport (RFC 1282) — overhauled for SynthAuth integration.
+ *
+ * Connection handshake (per RFC):
+ *   Client sends: \0 <ClientUser> \0 <ServerUser> \0 <TermType/Speed> \0
+ *   Server sends: \0  (acknowledgment)
+ *
+ * ─── Naive mode ───────────────────────────────────────────────────────────
+ *   ClientUser : Username (trusted as-is)
+ *   ServerUser : If a valid game name → launch that game; else → game selection
+ *   TermType   : Ignored
+ *
+ *   Examples:
+ *     "Alice" "Alice"     "ANSI" → game selection for user Alice
+ *     "Alice" "meteoroid" "ANSI" → launch meteoroid for user Alice
+ *
+ * ─── Authenticated mode ───────────────────────────────────────────────────
+ *   ClientUser : Username (used for auth derivation)
+ *   ServerUser : • Valid recovery code (XXXX-XXXX format) → silent BBS auto-login/register,
+ *                  then launch game from TermType (if valid), else game selection
+ *                • Valid game name → interactive auth, then launch that game
+ *                • Anything else  → interactive auth, then game from TermType or selection
+ *   TermType   : If a valid game name → game to launch (overridden by ServerUser game)
+ *
+ *   NOTE: If both ServerUser and TermType contain valid game names,
+ *         ServerUser takes precedence.
+ *
+ *   Examples:
+ *     "Alice" "Alice"     "ANSI"     → auth flow, then game selection
+ *     "Alice" "meteoroid" "ANSI"     → auth flow, then launch meteoroid
+ *     "Alice" "Y2Z1-X53H" "ANSI"    → silent login, then game selection
+ *     "Alice" "Y2Z1-X53H" "meteoroid" → silent login, then launch meteoroid
+ */
+```
 
 ### Security Properties of the BBS Path
 
@@ -588,76 +589,7 @@ The message refers back to the Mad-Lib mnemonics — encouraging the user to vis
 
 ## SynthDoor Integration
 
-SynthAuth ships as a standalone module. It is not yet wired into SynthDoor's core. The intended integration point is `game-router.js` or the transport layer.
-
-### Connection routing
-
-```js
-// packages/server/src/game-router.js  (or transport handler)
-const SynthAuth = require('../../synth-auth');
-
-const auth = new SynthAuth({
-  pepper:    process.env.PEPPER,
-  synthSalt: Buffer.from(process.env.SYNTH_SALT, 'hex'),
-});
-
-async function handleNewConnection(connection) {
-  // DORINFO1 present — trust the external BBS's authentication.
-  if (connection.dorinfo) {
-    connection.username = connection.dorinfo.username;
-    return routeToGame(connection);
-  }
-
-  // rlogin with system-id — use the silent BBS auto-registration path.
-  if (connection.rlogin && connection.rlogin.systemId) {
-    const systemCode = connection.rlogin.systemId;
-    const dialogue = {
-      send:   (text) => connection.terminal.println(text),
-      prompt: ()     => Promise.resolve(systemCode),
-    };
-    const result = await auth.loginFlow(dialogue, connection.remoteAddress, connection.rlogin.userId);
-    if (!result.success) return connection.close();
-    connection.username = result.username;
-    connection.publicId = result.publicId;
-    auth.sessions.attachToConnection(connection.id, {
-      username: result.username, publicId: result.publicId, internalId: result.internalId,
-    });
-    return routeToGame(connection);
-  }
-
-  // No DORINFO1, no rlogin — authenticate interactively with SynthAuth.
-  const dialogue = {
-    send:   (text) => connection.terminal.println(text),
-    prompt: (text) => connection.terminal.readLine({ prompt: text }),
-  };
-
-  const result = await auth.entryFlow(dialogue, connection.remoteAddress);
-
-  if (!result.success) {
-    connection.terminal.println('Authentication failed. Goodbye.');
-    return connection.close();
-  }
-
-  connection.username = result.username;
-  connection.publicId = result.publicId;
-
-  auth.sessions.attachToConnection(connection.id, {
-    username:   result.username,
-    publicId:   result.publicId,
-    internalId: result.internalId,
-  });
-
-  routeToGame(connection);
-}
-
-async function handleDisconnect(connection) {
-  auth.sessions.detachConnection(connection.id);
-}
-```
-
-### Future expansion
-
-The dialogue adapter and session store design anticipates a full BBS shell where a user logs in once and moves freely between games and applications. The session token from `entryFlow` can be carried by any component that needs to know who the user is — a chat system, a mail module, a game — without re-authentication.
+SynthAuth ships as a standalone module, and also separately integrated into SynthDoor.
 
 ---
 
